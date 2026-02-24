@@ -1,0 +1,152 @@
+var CONFIG = {
+  SPREADSHEET_URL: 'YOUR_SPREADSHEET_URL_HERE',
+  SHEET_NAME: 'Sheet1',
+   
+  // Insert your Merchant Center ID here (e.g., 123456789)
+  MERCHANT_ID: 123456789, 
+   
+  TIME_RANGE: 'LAST_30_DAYS', 
+  MIN_REVENUE: 3000, // Revenue threshold
+  EMAIL: 'your_email@example.com' // Leave empty if you don't need email alerts
+};
+
+function main() {
+  Logger.log('--- Script Start (MC API Version) ---');
+   
+  // 1. Collect profitable products
+  var sellingProducts = getSellingProducts();
+  var count = Object.keys(sellingProducts).length;
+  Logger.log('Found products with revenue > ' + CONFIG.MIN_REVENUE + ': ' + count);
+   
+  if (count === 0) return;
+
+  // 2. Check their status via API
+  var reportData = checkStockInMerchantCenter(sellingProducts);
+   
+  Logger.log('Found Out of Stock products (UK locale): ' + reportData.length);
+
+  // 3. SORTING and Reporting
+  if (reportData.length > 0) {
+    
+    // --- SORTING BLOCK ---
+    // Sort by the 4th column (Revenue) from highest to lowest
+    reportData.sort(function(a, b) {
+      return parseFloat(b[3]) - parseFloat(a[3]);
+    });
+    // -----------------------
+
+    exportToSpreadsheet(reportData);
+    
+    if(CONFIG.EMAIL) {
+      MailApp.sendEmail(CONFIG.EMAIL, "Ads Alert: " + reportData.length + " products went out of stock", "Check the spreadsheet.");
+    }
+  } else {
+    Logger.log('All your bestsellers are currently in stock.');
+  }
+}
+
+function getSellingProducts() {
+  var products = {};
+  var query = 
+    "SELECT " +
+    "  segments.product_item_id, " +
+    "  segments.product_title, " +
+    "  metrics.conversions, " +
+    "  metrics.conversions_value " +
+    "FROM shopping_performance_view " +
+    "WHERE " +
+    "  metrics.conversions_value > 0 " + 
+    "  AND segments.date DURING " + CONFIG.TIME_RANGE;
+
+  var report = AdsApp.search(query);
+  while (report.hasNext()) {
+    var row = report.next();
+    var id = String(row.segments.productItemId).trim();
+    
+    if (!products[id]) {
+      products[id] = {
+        title: row.segments.productTitle,
+        conversions: 0,
+        revenue: 0,
+        id: id
+      };
+    }
+    products[id].conversions += Number(row.metrics.conversions);
+    products[id].revenue += Number(row.metrics.conversionsValue);
+  }
+
+  var filtered = {};
+  for (var key in products) {
+    if (products[key].revenue >= CONFIG.MIN_REVENUE) {
+      filtered[key] = products[key];
+    }
+  }
+  return filtered;
+}
+
+function checkStockInMerchantCenter(productsMap) {
+  var outOfStockList = [];
+  var pageToken;
+  
+  try {
+    do {
+      var response = ShoppingContent.Products.list(CONFIG.MERCHANT_ID, {
+        maxResults: 250,
+        pageToken: pageToken
+      });
+        
+      if (response.resources) {
+        for (var i = 0; i < response.resources.length; i++) {
+          var product = response.resources[i];
+          
+          // --- LANGUAGE FILTER ---
+          // Google uses the 'uk' code for the Ukrainian language.
+          // If the content language is not 'uk', we skip this product.
+          if (product.contentLanguage !== 'uk') {
+            continue; 
+          }
+          // --------------------------
+
+          var mcId = product.offerId; 
+            
+          // Search for the ID in the list of sold products
+          var adsProduct = productsMap[mcId] || productsMap[mcId.toLowerCase()] || productsMap[mcId.toUpperCase()];
+
+          if (adsProduct) {
+            if (product.availability === 'out of stock') {
+              outOfStockList.push([
+                adsProduct.title,
+                mcId,
+                Math.round(adsProduct.conversions), 
+                adsProduct.revenue.toFixed(2),      
+                product.link || 'no link'
+              ]);
+            }
+          }
+        }
+      }
+      pageToken = response.nextPageToken;
+    } while (pageToken);
+  } catch (e) {
+    Logger.log("CRITICAL API ERROR: " + e.message);
+    Logger.log("Check: 1) Is 'Shopping Content' enabled in Advanced APIs? 2) Is MERCHANT_ID correct?");
+  }
+  
+  return outOfStockList;
+}
+
+function exportToSpreadsheet(data) {
+  var spreadsheet = SpreadsheetApp.openByUrl(CONFIG.SPREADSHEET_URL);
+  var sheet = spreadsheet.getSheetByName(CONFIG.SHEET_NAME);
+  if (!sheet) sheet = spreadsheet.insertSheet(CONFIG.SHEET_NAME);
+  sheet.clear(); 
+  
+  var header = ['Product Title', 'ID (SKU)', 'Conversions', 'Revenue', 'Link'];
+  sheet.appendRow(header);
+  sheet.getRange(1, 1, 1, header.length).setFontWeight("bold").setBackground("#FFF2CC");
+
+  if (data.length > 0) {
+    sheet.getRange(2, 1, data.length, data[0].length).setValues(data);
+  }
+  sheet.getRange(1, 6).setValue("Last Run: " + new Date());
+}
