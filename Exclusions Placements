@@ -1,0 +1,170 @@
+/*
+1) The search for ad placements runs across the entire account. These exclusions are added to 
+   a shared list "PlacementCleanerList_New", which is created automatically if it doesn't exist.
+
+2) Below is the 'exclude' array containing keywords to identify "junk" websites. 
+   It is divided into categories for easier management.
+*/
+
+var exclude = [
+    // --- Games, Gambling ---
+    'gta', 'dota', 'minecraft', 'igry', 'igra', 'igri', 'game', 'casino', 'slot', 
+    'poker', 'bonus', 'stavk', 'betting', 'gamer', 'geym', 'play-', 'quiz', 'test-',
+    'ferma', 'mafia', 'mario', '2048', 'dendy', 'sega', 'zuma', 'simulat', 'mods', 
+    'play', 'spintires', 'spin-tires',
+    
+    // --- Kids, School, Family Content ---
+    'kids', 'children', 'baby', 'mom', 'mama', 'parent', 'malysh', 'rebenok', 
+    'mult', 'cartoon', 'anime', 'raskrask', 'detskiy', 'doshkol', 'shkol', 
+    'ucheb', 'gdz', 'zno', 'student', 'resheb', 'referat', 'spongebob', 'barbie', 
+    'майнкрафт',
+    
+    // --- Entertainment, Media, File Sharing ---
+    'film', 'video', 'movie', 'kino', 'serial', 'tv', 'smotret', 'dyvytys', 
+    'online-', 'onlain', 'mp3', 'fb2', 'book', 'download', 'torrent', 'radio', 
+    'pesni', 'chords', 'anekdot', 'minusovk', 'knig', 'epub', 'citat', 'pdf', 
+    'lyrics', 'textpesn', 'oboі', 'wallpaper', 'smeshno', 'prikol', 'shanson',
+    'skachat', 'besplatno', 'free', 'flash', 'apk', 'android',
+    
+    // --- Esoterics, Horoscopes, Dating ---
+    'dating', 'goroskop', 'astro', 'zodiak', 'gadani', 'taro', 'znakomstv',
+    
+    // --- Recipes, Hobbies ---
+    'recept', 'recipe',
+    
+    // --- News, Politics (Use with caution!) ---
+    'novoros', 'donbass', 'dnr',
+    
+    // --- "Junk" and Aggregators ---
+    'top-', 'rating', 'katalog', 'sprav', 'forum', 'chat', 'blog', 'aforizm',
+    'weather', 'xxx', 'adult', 'porno', 'sex',
+    
+    // --- Domain Zones ---
+    '.kz', '.ru', '.by', '.uz', '.az', '.kg', '.in', '.cn', '.pl', '.md', '.xyz', '.online'
+];
+
+var EXCLUDED_PLACEMENT_LIST_NAME = 'PlacementCleanerList_New';
+
+/*
+3) Select the time period for gathering statistics.
+   Available periods:
+   LAST_7_DAYS, LAST_WEEK, LAST_MONTH, LAST_14_DAYS, LAST_30_DAYS,
+   LAST_BUSINESS_WEEK, THIS_WEEK_SUN_TODAY, THIS_WEEK_MON_TODAY,
+   LAST_WEEK_SUN_SAT, THIS_MONTH, ALL_TIME
+*/
+var period = 'LAST_7_DAYS';
+
+
+function main() {
+  var periodString = '';
+  if (period && period != 'ALL_TIME') {
+    periodString = "DURING " + period;
+    Logger.log("Gathering statistics " + periodString);
+  } else {
+    Logger.log('Gathering statistics for ALL_TIME');
+  }
+
+  // GET EXISTING EXCLUSIONS TO AVOID DUPLICATES
+  var existingPlacements = getExistingPlacementsFromList();
+
+  var report = AdWordsApp.report(
+    "SELECT Domain " +
+    "FROM AUTOMATIC_PLACEMENTS_PERFORMANCE_REPORT " +
+    periodString
+  );
+
+  var rows = report.rows();
+  var newPlacementsToExclude = [];
+
+  while (rows.hasNext()) {
+    var row = rows.next();
+    var placement = row['Domain'].toString();
+
+    // --- FILTERS ---
+    // 1. Ignore mobile apps
+    if (placement.indexOf('mobileapp::') != -1) {
+      continue;
+    }
+    // 2. Ignore YouTube
+    if (placement.indexOf('youtube.com') != -1) {
+      continue;
+    }
+
+    // 3. Check if it's a "bad" placement
+    if (containsAny(placement, exclude)) {
+      
+      // 4. Check if it's already in the exclusion list
+      if (!existingPlacements[placement]) {
+        newPlacementsToExclude.push(placement);
+        // Add to the object to prevent duplicates in the same run
+        existingPlacements[placement] = true; 
+      }
+    }
+  }
+
+  // Add only if there are new placements
+  if (newPlacementsToExclude.length > 0) {
+    Logger.log("Found new unique placements to exclude: " + newPlacementsToExclude.length);
+    Logger.log("Adding: " + newPlacementsToExclude.join(', '));
+    addPlacementsToExclusionList(newPlacementsToExclude);
+  } else {
+    Logger.log("No new placements to exclude found.");
+  }
+}
+
+/**
+ * Simple and correct check function
+ */
+function containsAny(str, substrings) {
+  for (var i = 0; i < substrings.length; i++) {
+    if (str.indexOf(substrings[i]) != -1) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Helper function to retrieve existing placements from the list.
+ * Returns an object (hash map) for fast lookup.
+ */
+function getExistingPlacementsFromList() {
+  var existing = {};
+  var listIterator = AdWordsApp.excludedPlacementLists()
+    .withCondition("Name = '" + EXCLUDED_PLACEMENT_LIST_NAME + "'")
+    .get();
+
+  if (listIterator.hasNext()) {
+    var list = listIterator.next();
+    var placements = list.excludedPlacements().get();
+    while (placements.hasNext()) {
+      existing[placements.next().getUrl()] = true;
+    }
+    Logger.log("Found " + Object.keys(existing).length + " existing exclusions in the list '" + EXCLUDED_PLACEMENT_LIST_NAME + "'");
+  }
+  return existing;
+}
+
+/**
+ * Finds the list by name (or creates a new one) and adds placements to it.
+ */
+function addPlacementsToExclusionList(placementsToAdd) {
+  var listIterator = AdWordsApp.excludedPlacementLists()
+    .withCondition("Name = '" + EXCLUDED_PLACEMENT_LIST_NAME + "'")
+    .get();
+
+  var excludedPlacementList;
+  if (listIterator.hasNext()) {
+    excludedPlacementList = listIterator.next();
+    Logger.log("Adding to existing list '" + EXCLUDED_PLACEMENT_LIST_NAME + "'");
+  } else {
+    Logger.log("Creating new list '" + EXCLUDED_PLACEMENT_LIST_NAME + "'");
+    excludedPlacementList = AdWordsApp.newExcludedPlacementListBuilder()
+      .withName(EXCLUDED_PLACEMENT_LIST_NAME)
+      .build()
+      .getResult();
+  }
+  
+  excludedPlacementList.addExcludedPlacements(placementsToAdd);
+  Logger.log("Successfully added " + placementsToAdd.length + " new placements.");
+}
