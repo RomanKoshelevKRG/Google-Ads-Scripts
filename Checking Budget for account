@@ -1,0 +1,269 @@
+var CONFIG = {
+    // Specify the minimum number of days before account funds run out to send an alert
+    days: 4,
+
+    // Specify emails for sending alerts, comma-separated if more than one
+    email: ['your_email1@example.com', 'your_email2@example.com'],
+
+    // Specify nicknames/names of the recipients, comma-separated if more than one
+    names: ['@PM_Username_1', '@PM_Username_2'],
+
+    // Label to identify accounts to track (e.g., 'ActiveP')
+    labelName: ['your_label_here'],
+
+    // Set the total monthly budget in the account's currency
+    MONTHLY_BUDGET: 1200000,
+
+    // ------------------------------------------------------------------------
+    // TELEGRAM SETUP INSTRUCTIONS:
+    // 
+    // 1. HOW TO GET A TELEGRAM TOKEN:
+    //    - Open Telegram and search for the "@BotFather" bot.
+    //    - Send the command "/newbot" and follow the instructions to create a bot.
+    //    - BotFather will give you an HTTP API Token (e.g., 123456789:ABCdefGhIJKlmn...).
+    // 
+    // 2. HOW TO GET THE CHAT ID:
+    //    - Add your new bot to the target group chat (or send it a direct message).
+    //    - Send a test message (e.g., "Hello") in that chat so the bot can see it.
+    //    - Open this URL in your web browser, replacing <YOUR_TOKEN> with the token from Step 1:
+    //      https://api.telegram.org/bot<YOUR_TOKEN>/getUpdates
+    //    - Look for the "chat":{"id": -123456789, ...} object in the response. 
+    //      That number is your Chat ID. (Note: Group chats usually start with a minus sign '-').
+    // 
+    // 3. HOW TO TEST YOUR SETUP IN THE BROWSER:
+    //    - Paste the following URL into your browser, replacing <YOUR_TOKEN> and <YOUR_CHAT_ID>:
+    //      https://api.telegram.org/bot<YOUR_TOKEN>/sendMessage?chat_id=<YOUR_CHAT_ID>&text=Test_Message
+    //    - If everything is correct, your bot will send "Test_Message" to the chat, 
+    //      and the browser will display a JSON response with '"ok": true'.
+    // ------------------------------------------------------------------------
+    
+    // Telegram parameters
+    TELEGRAM_TOKEN: 'YOUR_TELEGRAM_BOT_TOKEN_HERE',
+    TELEGRAM_CHAT_ID: '-YOUR_TELEGRAM_CHAT_ID_HERE'
+};
+
+
+function main() {
+    var accountName = AdWordsApp.currentAccount().getName();
+    // [LOG] Start script
+    Logger.log('--- Starting budget monitoring script for account: ' + accountName + ' ---');
+
+    try {
+        // 1. Check if ads are stopped (zero impressions)
+        todayCost(accountName);
+
+        // 2. Check for projected monthly overspend
+        checkMonthlyOverspend(accountName);
+
+        // 3. Check remaining balance on the Budget Order
+        // [LOG] Start step 3
+        Logger.log('3. Checking Budget Order remaining balance...');
+        var budgets = AdWordsApp.budgetOrders().withCondition('Status = ACTIVE').get();
+        
+        if (budgets.hasNext()) {
+            try {
+                var budget = budgets.next();
+                if (budget.getSpendingLimit() !== null) {
+                    var startDate = timeFormat(budget.getStartDateTime());
+                    var cost = AdWordsApp.currentAccount().getStatsFor(startDate, today()).getCost();
+                    var limit = budget.getSpendingLimit();
+                    var last7DaysCostByDay = AdWordsApp.currentAccount().getStatsFor("LAST_7_DAYS").getCost() / 7;
+                    var remainingDays = rDays(limit, cost, last7DaysCostByDay);
+                    var budgetNow = Math.max(0, (limit - cost));
+
+                    // [LOG] Budget Order Calculation Details
+                    Logger.log('   Budget Order details: Limit=' + limit + ', Spent=' + cost.toFixed(2) + ', Remaining=' + budgetNow.toFixed(2));
+                    Logger.log('   Budget Order forecast: Avg cost (7d)=' + last7DaysCostByDay.toFixed(2) + ', Projected days=' + remainingDays + ', Threshold=' + CONFIG.days + ' days.');
+
+                    if (remainingDays < CONFIG.days) {
+                        // [LOG] Sending BO Alert
+                        Logger.log('   >>> 🔔 ALERT SENT (Budget ending): ' + remainingDays + ' days left.');
+                        var messageHeader = CONFIG.names + ' / Budget is running out on account: ' + accountName;
+                        var messageBody = 'Account ' + accountName + ' . Current remaining balance = ' + budgetNow.toFixed(2) +
+                            '. Daily spend = ' + last7DaysCostByDay.toFixed(2) + ' in account currency. ' +
+                            'Funds will last for ' + remainingDays + ' day(s). The account is running out of funds. PM needs to be notified.';
+                        
+                        MailApp.sendEmail(CONFIG.email.join(','), messageHeader, messageBody);
+                        sendTelegramMessage(messageHeader + '. ' + messageBody);
+                    } else {
+                        // [LOG] BO Result: OK
+                        Logger.log('   Budget Order balance: OK. ' + remainingDays + ' days left, which is above the threshold (' + CONFIG.days + ' days).');
+                    }
+                } else {
+                     Logger.log('   Active Budget Order has no spend limit (getSpendingLimit() === null).');
+                }
+            } catch (e) {
+                // [LOG] Improved BO error handling
+                Logger.log('   ERROR (Budget Order Block): Failed to process budget order. ' + e.message + ' \nStack: ' + e.stack);
+                var messageHeader = 'Script Execution Error: Budget Control';
+                var messageBody = 'Check the Budget Control script for account: ' + accountName + ' ' + e;
+                MailApp.sendEmail(CONFIG.email.join(','), messageHeader, messageBody);
+                sendTelegramMessage(messageHeader + '. ' + messageBody);
+            }
+        } else {
+            // [LOG] No active Budget Orders
+            Logger.log('   No active Budget Orders found in account ' + accountName + '. Skipping check.');
+        }
+
+    } catch (e) {
+        // [LOG] Global error (if failure occurs outside try-catch blocks)
+         Logger.log('!!! GLOBAL SCRIPT ERROR: ' + e.message + ' \nStack: ' + e.stack);
+         sendTelegramMessage('!!! GLOBAL SCRIPT ERROR in account ' + accountName + ': ' + e.message);
+    }
+    
+    // [LOG] End script
+    Logger.log('--- Script finished for account: ' + accountName + ' ---');
+}
+
+/**
+ * Checks the monthly spend forecast and sends an alert if there is a risk of overspend.
+ */
+function checkMonthlyOverspend(accountName) {
+    // [LOG] Start step 2
+    Logger.log('2. Checking projected monthly overspend...');
+    try {
+        var monthlyBudget = CONFIG.MONTHLY_BUDGET; 
+        if (!monthlyBudget || monthlyBudget <= 0) {
+             Logger.log('   Monthly budget (MONTHLY_BUDGET) not set in CONFIG. Skipping overspend check.');
+             return;
+        }
+
+        var timeZone = AdWordsApp.currentAccount().getTimeZone();
+        var format = 'yyyyMMdd';
+        var now = new Date();
+        
+        var startDate = new Date(now.getFullYear(), now.getMonth(), 1);
+        var endDate = new Date(now.getFullYear(), now.getMonth() + 1, 0); 
+        
+        var startDateStr = Utilities.formatDate(startDate, timeZone, format);
+        var endDateStr = Utilities.formatDate(endDate, timeZone, format);
+        var todayStr = Utilities.formatDate(now, timeZone, format);
+        var todayDate = new Date(todayStr.substring(0, 4), todayStr.substring(4, 6) - 1, todayStr.substring(6, 8));
+
+        var oneDay = 24 * 60 * 60 * 1000;
+
+        var totalDaysInPeriod = Math.round(Math.abs((endDate.getTime() - startDate.getTime()) / oneDay)) + 1;
+        var daysPassed = Math.round(Math.abs((todayDate.getTime() - startDate.getTime()) / oneDay)) + 1;
+        var daysRemaining = totalDaysInPeriod - daysPassed;
+
+        if (daysPassed <= 0) {
+            daysPassed = 1; 
+        }
+
+        var costToDate = AdWordsApp.currentAccount().getStatsFor(startDateStr, todayStr).getCost();
+        var avgDailyCost = costToDate / daysPassed;
+
+        var projectedTotalCost = costToDate + (avgDailyCost * daysRemaining);
+
+        // [LOG] Forecast Details
+        Logger.log('   Forecast: Budget=' + monthlyBudget + ', Projected=' + projectedTotalCost.toFixed(2) + ', Spent=' + costToDate.toFixed(2) + ', Avg Spend=' + avgDailyCost.toFixed(2));
+
+        if (projectedTotalCost > monthlyBudget) {
+            var overspendAmount = (projectedTotalCost - monthlyBudget).toFixed(2);
+            // [LOG] Sending Overspend Alert
+            Logger.log('   >>> 🔔 ALERT SENT (Overspend): ' + overspendAmount);
+            
+            var messageHeader = CONFIG.names + ' / ⚠️ OVERSPEND FORECAST: ' + accountName;
+            var messageBody = 'Account: ' + accountName + '\n\n' +
+                '📈 Monthly Budget Overspend Forecast!\n\n' +
+                '▪️ Monthly Budget (' + startDateStr + ' - ' + endDateStr + '): ' + monthlyBudget.toFixed(2) + '\n' +
+                '▪️ Spent as of ' + todayStr + ': ' + costToDate.toFixed(2) + '\n' +
+                '▪️ Average daily spend: ' + avgDailyCost.toFixed(2) + '\n' +
+                '▪️ Days remaining in period: ' + daysRemaining + '\n\n' +
+                '▪️ Projected total spend: ' + projectedTotalCost.toFixed(2) + '\n' +
+                '▪️ 🔥 OVERSPEND FORECAST: ' + overspendAmount;
+
+            MailApp.sendEmail(CONFIG.email.join(','), messageHeader, messageBody);
+            sendTelegramMessage(messageHeader + '\n' + messageBody);
+        } else {
+            // [LOG] Forecast Result: OK
+            Logger.log('   Overspend forecast: OK. Projected (' + projectedTotalCost.toFixed(2) + ') is within budget (' + monthlyBudget + ').');
+        }
+
+    } catch (e) {
+        // [LOG] Improved Forecast Error Handling
+        Logger.log('   ERROR (Forecast): ' + e.message + ' \nStack: ' + e.stack);
+        var messageHeader = 'Script Error (Budget Forecast): ' + accountName;
+        var messageBody = 'Check checkMonthlyOverspend function. Account: ' + accountName + '. Error: ' + e;
+        MailApp.sendEmail(CONFIG.email.join(','), messageHeader, messageBody);
+        sendTelegramMessage(messageHeader + '. ' + messageBody);
+    }
+}
+
+
+function timeFormat(date) {
+    var year = date.year.toString();
+    var month = date.month.toString();
+    var day = date.day.toString();
+    if (month.length == 1) {
+        month = "0" + month;
+    }
+    if (day.length == 1) {
+        day = "0" + day;
+    }
+    return [year, month, day].join("");
+}
+
+function today() {
+    var date = new Date();
+    var timeZone = AdWordsApp.currentAccount().getTimeZone();
+    var format = 'yyyyMMdd';
+    return Utilities.formatDate(date, timeZone, format);
+}
+
+
+function rDays(limit, cost, last7DaysCostByDay) {
+    if (last7DaysCostByDay <= 0) {
+        return 0;
+    }
+    var remainingAmount = limit - cost;
+    if (remainingAmount <= 0) {
+        return 0;
+    }
+    var remainingDays = remainingAmount / last7DaysCostByDay;
+    return Math.floor(remainingDays);
+}
+
+
+function todayCost(accountName) {
+    // [LOG] Start step 1
+    Logger.log('1. Checking for stopped ads (0 impressions)...');
+    try {
+        var statsToday = AdWordsApp.currentAccount().getStatsFor("TODAY");
+        var impr = statsToday.getImpressions();
+        // [LOG] Impression details
+        Logger.log('   Impressions today: ' + impr);
+
+        if (impr < 1) {
+            // [LOG] Sending Stopped Ads Alert
+            Logger.log('   >>> 🔔 ALERT SENT: Ads inactive (0 impressions).');
+            sendTelegramMessage("Account - " + accountName + " ads INACTIVE (0 impressions today)");
+        } else {
+            // [LOG] Result: OK
+            Logger.log('   Ads are active: OK. (Impressions: ' + impr + ')');
+        }
+    } catch (e) {
+        // [LOG] Check Stopped Ads Error
+         Logger.log('   ERROR (Ads check): ' + e.message);
+         sendTelegramMessage('ERROR checking active ads, account ' + accountName + ': ' + e.message);
+    }
+}
+
+
+function sendTelegramMessage(text) {
+    try {
+        var telegramUrl = 'https://api.telegram.org/bot' + CONFIG.TELEGRAM_TOKEN + '/sendMessage?chat_id=' + CONFIG.TELEGRAM_CHAT_ID + '&text=';
+        var message = encodeURIComponent(text);
+        var sendMessageUrl = telegramUrl + message;
+        var options = {
+            method: 'POST',
+            contentType: 'application/json'
+        };
+        UrlFetchApp.fetch(sendMessageUrl, options);
+    } catch (e) {
+        // [LOG] Telegram send error
+        Logger.log('!!! TELEGRAM SEND ERROR: ' + e.message);
+        // Fallback to email if Telegram fails
+        MailApp.sendEmail(CONFIG.email.join(','), 'SCRIPT ERROR - Failed to send Telegram message', 'Error: ' + e.message + '\n\nMessage body:\n' + text);
+    }
+}
