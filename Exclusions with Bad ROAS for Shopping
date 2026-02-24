@@ -1,0 +1,91 @@
+// ------------------ SETTINGS ------------------
+
+// 1. Your Google Spreadsheet URL
+var SPREADSHEET_URL = "YOUR_SPREADSHEET_URL_HERE";
+
+// 2. Name of the sheet for quarantined (bad ROAS) products
+var SHEET_NAME = "bad_roas"; 
+
+// --- NEW "GRACE PERIOD" SETTINGS ---
+// 3. Name of the sheet for the "grace period" (create this sheet)
+var GRACE_PERIOD_SHEET_NAME = "Grace_Period";
+
+// 4. Duration of the "grace period" in days
+var GRACE_PERIOD_DAYS = 60;
+// --- END OF GRACE PERIOD SETTINGS ---
+
+// 5. SPECIFY THE EXACT FEED LABEL
+var FEED_LABEL = "YOUR_FEED_LABEL_HERE"; // <--- REPLACE THIS WITH YOUR TARGET FEED LABEL
+
+// 6. Your threshold values
+var COST_THRESHOLD = 1000; // Cost over 1000 (in your account's currency)
+var ROAS_THRESHOLD = 4;    // ROAS less than 4 (400%)
+
+// 7. Number of days for retrospective analysis (PERFORMANCE METRICS)
+var LOOKBACK_DAYS = 90; // Default is 90
+
+// 8. Target custom label index (enter a number from 0 to 4)
+var TARGET_CUSTOM_LABEL_INDEX = 2; // (0, 1, 2, 3, or 4)
+
+// 9. Minimum product age (in days from the FIRST CLICK)
+var MINIMUM_AGE_DAYS = 30;
+
+// 10. Period to search for "age" (recommended 365 to find the very first click)
+var AGE_LOOKBACK_DAYS = 365;
+
+// --- END OF SETTINGS ---
+
+// Convert account currency to micro-units
+var COST_THRESHOLD_MICROS = COST_THRESHOLD * 1000000;
+
+function main() {
+  
+  if (TARGET_CUSTOM_LABEL_INDEX < 0 || TARGET_CUSTOM_LABEL_INDEX > 4) {
+    Logger.log("ERROR: TARGET_CUSTOM_LABEL_INDEX must be a number between 0 and 4.");
+    return;
+  }
+  
+  Logger.log("Starting script for feed label: " + FEED_LABEL);
+  Logger.log("Target label: custom_label_" + TARGET_CUSTOM_LABEL_INDEX);
+  Logger.log("ROAS analysis period: " + LOOKBACK_DAYS + " days");
+  Logger.log("Minimum product age: " + MINIMUM_AGE_DAYS + " days (from first click)");
+  
+  var timeZone = AdsApp.currentAccount().getTimeZone();
+  var spreadsheet = SpreadsheetApp.openByUrl(SPREADSHEET_URL);
+  
+  // --- STAGE 0: Process "Grace Period" ---
+  var gracePeriodSet = getGracePeriodSet(spreadsheet, timeZone);
+  Logger.log("Loaded " + gracePeriodSet.size + " products in the 'grace period'.");
+  
+  // --- Read existing master list ---
+  var sheet = spreadsheet.getSheetByName(SHEET_NAME);
+  if (!sheet) {
+    Logger.log("ERROR: Sheet named '" + SHEET_NAME + "' not found.");
+    return;
+  }
+  
+  var masterListIds = new Set();
+  var lastRow = sheet.getLastRow();
+  
+  if (lastRow > 1) {
+    var existingIds = sheet.getRange(2, 1, lastRow - 1, 1).getValues();
+    for (var i = 0; i < existingIds.length; i++) {
+      if (existingIds[i][0] != "") {
+        masterListIds.add(existingIds[i][0].toString());  
+      }
+    }
+  }
+  Logger.log("Loaded " + masterListIds.size + " products from the master list.");
+  
+  // Dynamic headers
+  var newLabelHeader = "custom_label_" + TARGET_CUSTOM_LABEL_INDEX;
+  
+  if (sheet.getRange("A1").getValue() == "") {
+    sheet.getRange("A1:E1").setValues([
+      ["id", "#name", newLabelHeader, "Cost", "Calculated ROAS"]
+    ]);
+  }
+
+  // Date calculations
+  var today = new Date();
+  var yesterday = new Date(today.getTime() - 1 * 24 * 60 * 60 * 1000
