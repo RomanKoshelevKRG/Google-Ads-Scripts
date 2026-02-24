@@ -1,0 +1,209 @@
+// ------------------ SETTINGS (SCRIPT 1: BCG SORTER) ------------------
+
+// 1. URL of your Google Spreadsheet for BCG (Stars, Cows, etc.)
+var SPREADSHEET_URL_BCG = "YOUR_SPREADSHEET_URL_HERE"; // <--- YOUR BCG SPREADSHEET
+
+// 2. Sheet name
+var SHEET_NAME = "BCG_Snapshot";
+
+// 3. SPECIFY THE EXACT FEED LABEL
+var FEED_LABEL = "YOUR_FEED_LABEL_HERE"; 
+
+// 4. Analysis period (for ROAS / Conversions)
+var LOOKBACK_DAYS = 90;
+
+// 5. Target custom label (where 'stars', 'new_arrival', etc. will be written)
+var TARGET_CUSTOM_LABEL_INDEX = 2; // (0, 1, 2, 3, or 4)
+
+// --- Settings for "New Arrival" ---
+// 6. How many days a product is considered "new" (from the first click)
+var NEW_ARRIVAL_DAYS = 30;
+
+// 7. Period to search for "age" (365 is recommended)
+var AGE_LOOKBACK_DAYS = 365;
+
+// --- BCG Threshold Values ---
+var MIN_CONVERSIONS_HIGH = 5; // > 5 - "High volume"
+var STARS_ROAS_THRESHOLD = 10;   // 1000% (for Stars)
+var COW_ROAS_THRESHOLD = 6;    // 600% (for Cows and Question Marks)
+
+// ---------------- END OF SETTINGS ----------------
+
+function main() {
+  
+  Logger.log("Starting BCG Sorter script (including 'new_arrival').");
+  
+  var spreadsheet = SpreadsheetApp.openByUrl(SPREADSHEET_URL_BCG);
+  var sheet = spreadsheet.getSheetByName(SHEET_NAME);
+  
+  if (!sheet) {
+    Logger.log("ERROR: Sheet named '" + SHEET_NAME + "' not found.");
+    return;
+  }
+  
+  sheet.clear();
+  
+  var labelHeader = "custom_label_" + TARGET_CUSTOM_LABEL_INDEX;
+  
+  sheet.getRange("A1:G1").setValues([
+    ["id", "title", labelHeader, "Conversions", "Cost", "Calculated ROAS", "Product Age (Days)"]
+  ]);
+
+  // Date calculations
+  var timeZone = AdsApp.currentAccount().getTimeZone();
+  var today = new Date();
+  var yesterday = new Date(today.getTime() - 1 * 24 * 60 * 60 * 1000);  
+  var yesterdayFormatted = Utilities.formatDate(yesterday, timeZone, "yyyy-MM-dd");
+  
+  // Dates for ROAS analysis
+  var performanceLookbackDate = new Date(today.getTime() - LOOKBACK_DAYS * 24 * 60 * 60 * 1000); 
+  var performanceLookbackDateFormatted = Utilities.formatDate(performanceLookbackDate, timeZone, "yyyy-MM-dd"); 
+
+  // Dates for Age analysis
+  var ageLookbackDate = new Date(today.getTime() - AGE_LOOKBACK_DAYS * 24 * 60 * 60 * 1000); 
+  var ageLookbackDateFormatted = Utilities.formatDate(ageLookbackDate, timeZone, "yyyy-MM-dd"); 
+
+  
+  // --- STAGE 1: Collect product "age" ---
+  Logger.log("Stage 1: Searching for product 'age' (first click)...");
+  var productAges = {}; // Object to store age: { "id1": 50, "id2": 10 }
+  
+  var ageQuery = "SELECT " +
+        "segments.product_item_id, " +
+        "segments.date " + 
+      "FROM shopping_performance_view " +
+      "WHERE " +
+        "segments.date BETWEEN '" + ageLookbackDateFormatted + "' AND '" + yesterdayFormatted + "' " +
+        "AND metrics.clicks > 0 " +
+      "ORDER BY segments.product_item_id, segments.date ASC"; 
+
+  try {
+    var ageReport = AdsApp.report(ageQuery);
+    var ageRows = ageReport.rows();
+    var seenProducts = new Set(); 
+    
+    while (ageRows.hasNext()) {
+      var row = ageRows.next();
+      var productId = row["segments.product_item_id"];
+      
+      if (!seenProducts.has(productId)) {
+        var firstClickDateStr = row["segments.date"]; 
+        var min_date = Utilities.parseDate(firstClickDateStr, timeZone, "yyyy-MM-dd");
+        var diffTime = today.getTime() - min_date.getTime();
+        var ageInDays = Math.floor(diffTime / (1000 * 60 * 60 * 24));
+        
+        productAges[productId] = ageInDays;
+        seenProducts.add(productId); 
+      }
+    }
+  } catch (e) {
+    Logger.log("Error in Stage 1 (Age search): " + e);
+    return;
+  }
+  
+  Logger.log("Found 'age' for " + seenProducts.size + " products.");
+  
+  // --- STAGE 2: Collect ROAS and Conversions stats ---
+  Logger.log("Stage 2: Searching for ROAS/Conversions over " + LOOKBACK_DAYS + " days.");
+  
+  var labelToRead = "shopping_product.custom_attribute" + TARGET_CUSTOM_LABEL_INDEX;
+
+  var query = "SELECT " +
+        "shopping_product.item_id, " +
+        "shopping_product.title, " + 
+        labelToRead + ", " + // Read, but not used (leftover from old script)
+        "shopping_product.feed_label, " +
+        "metrics.cost_micros, " +  
+        "metrics.conversions_value, " +
+        "metrics.conversions " + 
+      "FROM shopping_product " +
+      "WHERE " +
+        "segments.date BETWEEN '" + performanceLookbackDateFormatted + "' AND '" + yesterdayFormatted + "' " + 
+        "AND shopping_product.feed_label = '" + FEED_LABEL + "' " +  
+        "AND metrics.clicks > 0";
+
+  var productsToReport = [];
+
+  try {
+    var report = AdsApp.report(query);
+    var rows = report.rows();
+    
+    while (rows.hasNext()) {
+      var row = rows.next();
+      
+      var productId = row["shopping_product.item_id"];
+      var title = row["shopping_product.title"];
+      var costMicros = parseFloat(row["metrics.cost_micros"]);  
+      var convValue = parseFloat(row["metrics.conversions_value"]);
+      var conversions = parseFloat(row["metrics.conversions"]);
+      
+      var cost = costMicros / 1000000;
+      var roas = (cost > 0) ? convValue / cost : 0;
+      
+      // Get age from Stage 1 (if no clicks, age will be 0)
+      var age = productAges[productId] || 0; 
+      
+      var stats = {
+        roas: roas,
+        conversions: conversions
+      };
+      
+      // Pass age to the classification function
+      var newLabel = classifyProduct(stats, age);
+      
+      // Product will be added to the report ONLY IF newLabel is not empty
+      if (newLabel) {
+        productsToReport.push([
+          productId,
+          title,
+          newLabel,
+          conversions.toFixed(2),
+          cost.toFixed(2),
+          roas.toFixed(2),
+          age // Add age for info
+        ]);
+      }
+    }
+  } catch (e) {
+    Logger.log("ERROR executing GAQL query (Stage 2): " + e);
+    return;
+  }
+
+  // --- STAGE 3: Write to spreadsheet ---
+  if (productsToReport.length > 0) {
+    sheet.getRange(2, 1, productsToReport.length, productsToReport[0].length).setValues(productsToReport);
+    Logger.log("Report generated. " + productsToReport.length + " products were classified.");
+  } else {
+    Logger.log("No products found for classification.");
+  }
+}
+
+/**
+ * Classification function (BCG + New Arrival)
+ */
+function classifyProduct(stats, age) {
+  
+  // 1. CHECK FOR "NEW ARRIVAL"
+  if (age < NEW_ARRIVAL_DAYS) {
+    return "new_arrival";
+  }
+  
+  // 2. BCG LOGIC (only for "old" products)
+  
+  // "HIGH ROAS" Quadrant (>= 600%)
+  if (stats.roas >= COW_ROAS_THRESHOLD) {
+    if (stats.conversions > MIN_CONVERSIONS_HIGH) {
+      if (stats.roas >= STARS_ROAS_THRESHOLD) {
+        return "stars";
+      } else {
+        return "cash_cow";
+      }
+    } else {
+      return "question_mark";
+    }
+  } 
+  
+  // "LOW ROAS" Quadrant (< 600%)
+  // This script ignores them (they will be handled by Script 2 or another script)
+  return null;
+}
