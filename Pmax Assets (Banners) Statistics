@@ -1,0 +1,129 @@
+/**
+ * Google Ads Script to export PMax asset performance data (Banners & Videos)
+ * including image dimensions, aspect ratios, and direct asset links.
+ */
+
+function main() {
+  // 1. Configuration
+  // Put your Google Sheet URL here:
+  const SPREADSHEET_URL = 'URL YOUR SHEET';
+  // Date range: LAST_MONTH, LAST_30_DAYS, THIS_MONTH, etc.
+  const DATE_RANGE = 'LAST_MONTH';
+  
+  // 2. Access the spreadsheet
+  const ss = SpreadsheetApp.openByUrl(SPREADSHEET_URL);
+  const sheet = ss.getActiveSheet();
+  sheet.clear(); // Clear existing content
+  
+  // 3. Set headers (Added Asset Link)
+  const headers = [
+    'Campaign Name', 
+    'Asset Group Name', 
+    'Asset Name', 
+    'Asset Type', 
+    'Dimensions (WxH)',
+    'Aspect Ratio',
+    'Asset Link',
+    'Cost', 
+    'Impressions', 
+    'Clicks', 
+    'Conversions'
+  ];
+  sheet.appendRow(headers);
+
+  // 4. Build GAQL query for PMax assets
+  // Added image URL and YouTube video ID fields
+  const query = 
+    "SELECT " +
+      "campaign.name, " +
+      "asset_group.name, " +
+      "asset.name, " +
+      "asset.type, " +
+      "asset.image_asset.full_size.width_pixels, " +
+      "asset.image_asset.full_size.height_pixels, " +
+      "asset.image_asset.full_size.url, " + 
+      "asset.youtube_video_asset.youtube_video_id, " +
+      "metrics.cost_micros, " +
+      "metrics.impressions, " +
+      "metrics.clicks, " +
+      "metrics.conversions " +
+    "FROM asset_group_asset " +
+    "WHERE segments.date DURING " + DATE_RANGE + " " +
+    "AND asset.type IN ('IMAGE', 'YOUTUBE_VIDEO') " + 
+    "ORDER BY metrics.cost_micros DESC";
+
+  // 5. Execute report and iterate through rows
+  const report = AdsApp.report(query);
+  const rows = report.rows();
+  const dataToUpload = [];
+
+  while (rows.hasNext()) {
+    const row = rows.next();
+    
+    // Cost is in micros, need to divide by 1,000,000
+    const cost = parseFloat(row['metrics.cost_micros']) / 1000000;
+    const assetType = row['asset.type'];
+    
+    // Variables for size, ratio, and link
+    let dimensions = 'N/A';
+    let aspectRatio = 'N/A';
+    let assetLink = 'N/A';
+    
+    // Process IMAGE assets
+    if (assetType === 'IMAGE') {
+      const width = row['asset.image_asset.full_size.width_pixels'];
+      const height = row['asset.image_asset.full_size.height_pixels'];
+      assetLink = row['asset.image_asset.full_size.url'] || 'N/A'; // Get Image URL
+      
+      if (width && height) {
+        dimensions = width + 'x' + height;
+        const ratioCalc = width / height;
+        
+        if (ratioCalc > 1.9) {
+          aspectRatio = '1.91:1 (Landscape)';
+        } else if (ratioCalc === 1) {
+          aspectRatio = '1:1 (Square)';
+        } else if (ratioCalc > 0.79 && ratioCalc < 0.81) {
+          aspectRatio = '4:5 (Portrait)';
+        } else if (ratioCalc > 0.55 && ratioCalc < 0.57) {
+          aspectRatio = '9:16 (Vertical)';
+        } else {
+          aspectRatio = ratioCalc.toFixed(2) + ':1'; 
+        }
+      }
+    } 
+    // Process YOUTUBE_VIDEO assets
+    else if (assetType === 'YOUTUBE_VIDEO') {
+      dimensions = 'YouTube Video';
+      aspectRatio = 'Check manually';
+      
+      // Construct YouTube URL using the video ID
+      const videoId = row['asset.youtube_video_asset.youtube_video_id'];
+      if (videoId) {
+        assetLink = 'https://www.youtube.com/watch?v=' + videoId;
+      }
+    }
+
+    dataToUpload.push([
+      row['campaign.name'],
+      row['asset_group.name'],
+      row['asset.name'],
+      assetType,
+      dimensions,
+      aspectRatio,
+      assetLink,
+      cost.toFixed(2),
+      row['metrics.impressions'],
+      row['metrics.clicks'],
+      row['metrics.conversions']
+    ]);
+  }
+
+  // 6. Batch write to spreadsheet
+  if (dataToUpload.length > 0) {
+    sheet.getRange(2, 1, dataToUpload.length, dataToUpload[0].length).setValues(dataToUpload);
+    console.log('Successfully exported ' + dataToUpload.length + ' rows.');
+  } else {
+    console.log('No data found for the selected period.');
+  }
+}
