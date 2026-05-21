@@ -18,7 +18,7 @@ var MINIMUM_AGE_DAYS = 30;
 var AGE_LOOKBACK_DAYS = 365;
 
 // === MERCHANT CENTER SETTINGS ===
-var MERCHANT_ID = "********"; 
+var MERCHANT_ID = "649608668"; 
 
 // === MULTI-FEED & LANGUAGE SETTINGS ===
 // Leave empty [] to check ALL feeds, or specify which feed labels to analyze, e.g., ["UA", "PL", "US"]
