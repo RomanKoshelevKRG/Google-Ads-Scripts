@@ -1,45 +1,35 @@
-// ------------------ SETTINGS ------------------
-
-// 1. Your Google Spreadsheet URL
-var SPREADSHEET_URL = "YOUR_SPREADSHEET_URL_HERE";
-
-// 2. Name of the sheet for quarantined (bad ROAS) products
-var SHEET_NAME = "bad_roas"; 
-
-// --- NEW "GRACE PERIOD" SETTINGS ---
-// 3. Name of the sheet for the "grace period" (create this sheet)
+// URL of the Google Spreadsheet used for tracking
+var SPREADSHEET_URL = "https://docs.google.com/spreadsheets/d/1tNwa6GENsipLtQdmmNl2gNqIt5yO-_ZCNuyEZwXGxGA/edit?gid=0#gid=0";
+// Name of the main sheet for bad ROAS products
+var SHEET_NAME = "bad_roas";
+// Name of the sheet for products in the grace period
 var GRACE_PERIOD_SHEET_NAME = "Grace_Period";
-
-// 4. Duration of the "grace period" in days
+// Number of days a product stays in the grace period before being analyzed again
 var GRACE_PERIOD_DAYS = 60;
-// --- END OF GRACE PERIOD SETTINGS ---
-
-// 5. SPECIFY THE EXACT FEED LABEL
-var FEED_LABEL = "YOUR_FEED_LABEL_HERE"; // <--- REPLACE THIS WITH YOUR TARGET FEED LABEL
-
-// 6. Your threshold values
-var COST_THRESHOLD = 1000; // Cost over 1000 (in your account's currency)
-var ROAS_THRESHOLD = 4;    // ROAS less than 4 (400%)
-
-// 7. Number of days for retrospective analysis (PERFORMANCE METRICS)
-var LOOKBACK_DAYS = 90; // Default is 90
-
-// 8. Target custom label index (enter a number from 0 to 4)
-var TARGET_CUSTOM_LABEL_INDEX = 2; // (0, 1, 2, 3, or 4)
-
-// 9. Minimum product age (in days from the FIRST CLICK)
+// Feed label (target country/region) to filter products
+var FEED_LABEL = "UA";
+// Minimum cost in local currency (UAH) to consider a product for analysis
+var COST_THRESHOLD_UAH = 200;
+// Return on Ad Spend threshold; products below this are flagged as "bad"
+var ROAS_THRESHOLD = 5;
+// Number of days to look back for performance metrics (ROAS calculation)
+var LOOKBACK_DAYS = 90;
+// Index of the custom label (0-4) to read/update
+var TARGET_CUSTOM_LABEL_INDEX = 2;
+// Minimum days since the first click for a product to be analyzed
 var MINIMUM_AGE_DAYS = 30;
-
-// 10. Period to search for "age" (recommended 365 to find the very first click)
+// Maximum days to look back to find the first click (product age)
 var AGE_LOOKBACK_DAYS = 365;
 
-// --- END OF SETTINGS ---
+// === MERCHANT CENTER SETTINGS ===
+var MERCHANT_ID = "649608668"; 
+// The language code of your feed. MUST BE LOWERCASE for the API (e.g., "uk", "ru")
+var FEED_LANGUAGE = "uk"; 
 
-// Convert account currency to micro-units
-var COST_THRESHOLD_MICROS = COST_THRESHOLD * 1000000;
+var COST_THRESHOLD_MICROS = COST_THRESHOLD_UAH * 1000000;
 
 function main() {
-  
+  // Check if the custom label index is valid (must be between 0 and 4 according to Google Ads specs)
   if (TARGET_CUSTOM_LABEL_INDEX < 0 || TARGET_CUSTOM_LABEL_INDEX > 4) {
     Logger.log("ERROR: TARGET_CUSTOM_LABEL_INDEX must be a number between 0 and 4.");
     return;
@@ -47,26 +37,23 @@ function main() {
   
   Logger.log("Starting script for feed label: " + FEED_LABEL);
   Logger.log("Target label: custom_label_" + TARGET_CUSTOM_LABEL_INDEX);
-  Logger.log("ROAS analysis period: " + LOOKBACK_DAYS + " days");
-  Logger.log("Minimum product age: " + MINIMUM_AGE_DAYS + " days (from first click)");
+  Logger.log("Merchant ID set to: " + MERCHANT_ID);
   
   var timeZone = AdsApp.currentAccount().getTimeZone();
   var spreadsheet = SpreadsheetApp.openByUrl(SPREADSHEET_URL);
-  
-  // --- STAGE 0: Process "Grace Period" ---
   var gracePeriodSet = getGracePeriodSet(spreadsheet, timeZone);
-  Logger.log("Loaded " + gracePeriodSet.size + " products in the 'grace period'.");
   
-  // --- Read existing master list ---
   var sheet = spreadsheet.getSheetByName(SHEET_NAME);
+  // Check if the target sheet exists; if not, create a new one automatically
   if (!sheet) {
-    Logger.log("ERROR: Sheet named '" + SHEET_NAME + "' not found.");
-    return;
+    Logger.log("Sheet '" + SHEET_NAME + "' not found. Creating a new one...");
+    sheet = spreadsheet.insertSheet(SHEET_NAME);
   }
   
   var masterListIds = new Set();
   var lastRow = sheet.getLastRow();
   
+  // Check if there are existing products in the sheet to build a master list and avoid duplicates
   if (lastRow > 1) {
     var existingIds = sheet.getRange(2, 1, lastRow - 1, 1).getValues();
     for (var i = 0; i < existingIds.length; i++) {
@@ -75,17 +62,209 @@ function main() {
       }
     }
   }
-  Logger.log("Loaded " + masterListIds.size + " products from the master list.");
   
-  // Dynamic headers
   var newLabelHeader = "custom_label_" + TARGET_CUSTOM_LABEL_INDEX;
   
+  // Check if the sheet is completely empty (A1 is blank) to set up headers and formatting
   if (sheet.getRange("A1").getValue() == "") {
-    sheet.getRange("A1:E1").setValues([
-      ["id", "#name", newLabelHeader, "Cost", "Calculated ROAS"]
+    sheet.getRange("A1:F1").setValues([
+      ["id", "#name", newLabelHeader, "Cost (UAH)", "Calculated ROAS", "#Price"]
     ]);
+    sheet.getRange("A1:F1").setFontWeight("bold");
+    sheet.setFrozenRows(1);
+    Logger.log("Created template and headers for sheet: " + SHEET_NAME);
+  } 
+  // If sheet exists but is missing the Price column, add it with the #Price header
+  else if (sheet.getRange("F1").getValue() == "") {
+      sheet.getRange("F1").setValue("#Price");
+      Logger.log("Added missing '#Price' header to existing sheet.");
   }
 
-  // Date calculations
   var today = new Date();
-  var yesterday = new Date(today.getTime() - 1 * 24 * 60 * 60 * 1000
+  var yesterday = new Date(today.getTime() - 1 * 24 * 60 * 60 * 1000);  
+  var yesterdayFormatted = Utilities.formatDate(yesterday, timeZone, "yyyy-MM-dd");
+  var performanceLookbackDate = new Date(today.getTime() - LOOKBACK_DAYS * 24 * 60 * 60 * 1000); 
+  var performanceLookbackDateFormatted = Utilities.formatDate(performanceLookbackDate, timeZone, "yyyy-MM-dd"); 
+  var ageLookbackDate = new Date(today.getTime() - AGE_LOOKBACK_DAYS * 24 * 60 * 60 * 1000); 
+  var ageLookbackDateFormatted = Utilities.formatDate(ageLookbackDate, timeZone, "yyyy-MM-dd"); 
+
+  Logger.log("Step 1: Searching for products older than " + MINIMUM_AGE_DAYS + " days...");
+  var oldEnoughProducts = new Set();
+  var ageQuery = "SELECT segments.product_item_id, segments.date FROM shopping_performance_view WHERE segments.date BETWEEN '" + ageLookbackDateFormatted + "' AND '" + yesterdayFormatted + "' AND metrics.clicks > 0 ORDER BY segments.product_item_id, segments.date ASC"; 
+
+  try {
+    var ageReport = AdsApp.report(ageQuery);
+    var ageRows = ageReport.rows();
+    var seenProducts = new Set(); 
+    
+    while (ageRows.hasNext()) {
+      var row = ageRows.next();
+      var productId = row["segments.product_item_id"];
+      
+      // Ensure we only process the earliest click (first occurrence) for each product
+      if (!seenProducts.has(productId)) {
+        var min_date = Utilities.parseDate(row["segments.date"], timeZone, "yyyy-MM-dd");
+        var diffTime = today.getTime() - min_date.getTime();
+        var ageInDays = Math.floor(diffTime / (1000 * 60 * 60 * 24));
+        
+        if (ageInDays >= MINIMUM_AGE_DAYS) {
+          oldEnoughProducts.add(productId);
+        }
+        seenProducts.add(productId);  
+      }
+    }
+  } catch (e) {
+    Logger.log("Error in Step 1: " + e);
+    return; 
+  }
+  
+  Logger.log("Found " + oldEnoughProducts.size + " 'old enough' products.");
+  Logger.log("Step 2: Searching for underperforming products (ROAS < " + ROAS_THRESHOLD + ") over " + LOOKBACK_DAYS + " days.");
+  
+  var labelToRead = "shopping_product.custom_attribute" + TARGET_CUSTOM_LABEL_INDEX;
+  var performanceQuery = "SELECT shopping_product.item_id, shopping_product.title, " + labelToRead + ", shopping_product.feed_label, metrics.cost_micros, metrics.conversions_value FROM shopping_product WHERE segments.date BETWEEN '" + performanceLookbackDateFormatted + "' AND '" + yesterdayFormatted + "' AND metrics.cost_micros > " + COST_THRESHOLD_MICROS + " AND shopping_product.feed_label = '" + FEED_LABEL + "' AND metrics.clicks > 0";
+
+  var potentialBadProducts = [];
+
+  try {
+    var report = AdsApp.report(performanceQuery);
+    var rows = report.rows();
+    
+    while (rows.hasNext()) {
+      var row = rows.next();
+      var costMicros = parseFloat(row["metrics.cost_micros"]);  
+      var convValue = parseFloat(row["metrics.conversions_value"]);
+      var roas = (costMicros > 0) ? (convValue / (costMicros / 1000000)) : 0;
+      
+      if (roas < ROAS_THRESHOLD) {
+        potentialBadProducts.push({
+          id: row["shopping_product.item_id"],
+          title: row["shopping_product.title"],
+          currentLabel: row[labelToRead],
+          costUAH: (costMicros / 1000000),
+          roas: roas
+        });
+      }
+    }
+  } catch (e) {
+    Logger.log("Error in Step 2: " + e);
+    return; 
+  }
+
+  Logger.log("Found " + potentialBadProducts.length + " potentially underperforming products.");
+  var newProductsToAdd = [];  
+  
+  for (var i = 0; i < potentialBadProducts.length; i++) {
+    var product = potentialBadProducts[i];
+    var productId = product.id;
+    
+    // Check if the product meets ALL criteria: old enough, not already in the sheet, and not in grace period
+    if (oldEnoughProducts.has(productId) && !masterListIds.has(productId) && !gracePeriodSet.has(productId)) {
+      
+      Logger.log("Fetching price from Merchant Center for product: " + productId);
+      var productPrice = getProductPriceFromMerchantCenter(productId);
+      
+      newProductsToAdd.push([
+        productId,          
+        product.title,
+        "bad_roas",         
+        product.costUAH.toFixed(2), 
+        product.roas.toFixed(2),
+        productPrice 
+      ]);
+      masterListIds.add(productId); 
+      
+    } else if (gracePeriodSet.has(productId)) {
+       Logger.log("Product " + productId + " is in the grace period. Skipping.");
+    } 
+  }
+
+  if (newProductsToAdd.length > 0) {
+    var startRow = sheet.getLastRow() + 1;
+    sheet.getRange(startRow, 1, newProductsToAdd.length, newProductsToAdd[0].length).setValues(newProductsToAdd);
+    Logger.log("Added " + newProductsToAdd.length + " new products to the Google Sheet.");
+  } else {
+    Logger.log("No new underperforming products found to add.");
+  }
+
+  Logger.log("Script execution completed.");
+}
+
+function getProductPriceFromMerchantCenter(productId) {
+  // Try format 1: standard (e.g. online:uk:UA:12345)
+  var contentApiId = "online:" + FEED_LANGUAGE + ":" + FEED_LABEL + ":" + productId;
+  Logger.log("  -> Trying Content API ID: " + contentApiId);
+  
+  try {
+    var product = ShoppingContent.Products.get(MERCHANT_ID, contentApiId);
+    if (product && product.price) {
+      Logger.log("  -> SUCCESS: Price found: " + product.price.value);
+      return product.price.value; 
+    }
+  } catch(e) {
+    Logger.log("  -> FAILED with ID format 1. Error: " + e.message);
+  }
+
+  // Try format 2: fallback for some feed setups (just the product ID)
+  Logger.log("  -> Trying Fallback API ID: " + productId);
+  try {
+    var product = ShoppingContent.Products.get(MERCHANT_ID, productId);
+    if (product && product.price) {
+      Logger.log("  -> SUCCESS: Price found using fallback ID: " + product.price.value);
+      return product.price.value; 
+    }
+  } catch(e) {
+    Logger.log("  -> FAILED with format 2. Error: " + e.message);
+  }
+  
+  return "Not Found";
+}
+
+function getGracePeriodSet(spreadsheet, timeZone) {
+  var sheet = spreadsheet.getSheetByName(GRACE_PERIOD_SHEET_NAME);
+  if (!sheet) {
+    sheet = spreadsheet.insertSheet(GRACE_PERIOD_SHEET_NAME);
+  }
+  
+  if (sheet.getRange("A1").getValue() == "") {
+    sheet.getRange("A1:B1").setValues([["id", "cooldown_end_date"]]);
+    sheet.getRange("A1:B1").setFontWeight("bold");
+    sheet.setFrozenRows(1);
+  }
+
+  var lastRow = sheet.getLastRow();
+  if (lastRow < 2) return new Set(); 
+  
+  var range = sheet.getRange(2, 1, lastRow - 1, 2);
+  var values = range.getValues();
+  var today = new Date();
+  var protectedIds = new Set();
+  var updates = []; 
+
+  for (var i = 0; i < values.length; i++) {
+    var id = values[i][0];
+    var cooldownDate = values[i][1];
+    
+    if (id == "") {
+      updates.push([""]); 
+      continue;
+    }
+    
+    if (cooldownDate == "") {
+      var newCooldownDate = new Date(today.getTime() + GRACE_PERIOD_DAYS * 24 * 60 * 60 * 1000);
+      var formattedDate = Utilities.formatDate(newCooldownDate, timeZone, "yyyy-MM-dd");
+      updates.push([formattedDate]);
+      protectedIds.add(id.toString());
+    } else {
+      var dateObj = new Date(cooldownDate);
+      if (dateObj > today) protectedIds.add(id.toString());
+      updates.push([Utilities.formatDate(dateObj, timeZone, "yyyy-MM-dd")]);
+    }
+  }
+  
+  if (updates.length > 0) {
+    sheet.getRange(2, 2, updates.length, 1).setValues(updates);
+  }
+  
+  return protectedIds;
+}
