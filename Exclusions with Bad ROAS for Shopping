@@ -6,10 +6,6 @@ var SHEET_NAME = "bad_roas";
 var GRACE_PERIOD_SHEET_NAME = "Grace_Period";
 // Number of days a product stays in the grace period before being analyzed again
 var GRACE_PERIOD_DAYS = 60;
-// Feed label (target country/region) to filter products
-var FEED_LABEL = "UA";
-// Minimum cost in local currency (UAH) to consider a product for analysis
-var COST_THRESHOLD_UAH = 200;
 // Return on Ad Spend threshold; products below this are flagged as "bad"
 var ROAS_THRESHOLD = 5;
 // Number of days to look back for performance metrics (ROAS calculation)
@@ -22,29 +18,37 @@ var MINIMUM_AGE_DAYS = 30;
 var AGE_LOOKBACK_DAYS = 365;
 
 // === MERCHANT CENTER SETTINGS ===
-var MERCHANT_ID = "649608668"; 
-// The language code of your feed. MUST BE LOWERCASE for the API (e.g., "uk", "ru")
-var FEED_LANGUAGE = "uk"; 
+var MERCHANT_ID = "********"; 
 
+// === MULTI-FEED & LANGUAGE SETTINGS ===
+// Leave empty [] to check ALL feeds, or specify which feed labels to analyze, e.g., ["UA", "PL", "US"]
+var ALLOWED_FEED_LABELS = ["UA"]; 
+
+// List all language codes used in your feeds. The script will automatically test them to find the price.
+var ALLOWED_LANGUAGES = ["uk", "ru", "en", "pl"]; 
+
+// === COST THRESHOLD SETTINGS ===
+// Minimum cost in local currency (UAH) to consider a product for analysis
+var COST_THRESHOLD_UAH = 200;
+// Convert cost threshold to micros (Google Ads standard API format: 1 unit = 1,000,000 micros)
 var COST_THRESHOLD_MICROS = COST_THRESHOLD_UAH * 1000000;
 
 function main() {
-  // Check if the custom label index is valid (must be between 0 and 4 according to Google Ads specs)
   if (TARGET_CUSTOM_LABEL_INDEX < 0 || TARGET_CUSTOM_LABEL_INDEX > 4) {
     Logger.log("ERROR: TARGET_CUSTOM_LABEL_INDEX must be a number between 0 and 4.");
     return;
   }
   
-  Logger.log("Starting script for feed label: " + FEED_LABEL);
+  Logger.log("Starting multi-feed script.");
   Logger.log("Target label: custom_label_" + TARGET_CUSTOM_LABEL_INDEX);
   Logger.log("Merchant ID set to: " + MERCHANT_ID);
+  Logger.log("Cost threshold set to: " + COST_THRESHOLD_UAH + " UAH");
   
   var timeZone = AdsApp.currentAccount().getTimeZone();
   var spreadsheet = SpreadsheetApp.openByUrl(SPREADSHEET_URL);
   var gracePeriodSet = getGracePeriodSet(spreadsheet, timeZone);
   
   var sheet = spreadsheet.getSheetByName(SHEET_NAME);
-  // Check if the target sheet exists; if not, create a new one automatically
   if (!sheet) {
     Logger.log("Sheet '" + SHEET_NAME + "' not found. Creating a new one...");
     sheet = spreadsheet.insertSheet(SHEET_NAME);
@@ -53,7 +57,6 @@ function main() {
   var masterListIds = new Set();
   var lastRow = sheet.getLastRow();
   
-  // Check if there are existing products in the sheet to build a master list and avoid duplicates
   if (lastRow > 1) {
     var existingIds = sheet.getRange(2, 1, lastRow - 1, 1).getValues();
     for (var i = 0; i < existingIds.length; i++) {
@@ -65,7 +68,6 @@ function main() {
   
   var newLabelHeader = "custom_label_" + TARGET_CUSTOM_LABEL_INDEX;
   
-  // Check if the sheet is completely empty (A1 is blank) to set up headers and formatting
   if (sheet.getRange("A1").getValue() == "") {
     sheet.getRange("A1:F1").setValues([
       ["id", "#name", newLabelHeader, "Cost (UAH)", "Calculated ROAS", "#Price"]
@@ -73,9 +75,7 @@ function main() {
     sheet.getRange("A1:F1").setFontWeight("bold");
     sheet.setFrozenRows(1);
     Logger.log("Created template and headers for sheet: " + SHEET_NAME);
-  } 
-  // If sheet exists but is missing the Price column, add it with the #Price header
-  else if (sheet.getRange("F1").getValue() == "") {
+  } else if (sheet.getRange("F1").getValue() == "") {
       sheet.getRange("F1").setValue("#Price");
       Logger.log("Added missing '#Price' header to existing sheet.");
   }
@@ -101,7 +101,6 @@ function main() {
       var row = ageRows.next();
       var productId = row["segments.product_item_id"];
       
-      // Ensure we only process the earliest click (first occurrence) for each product
       if (!seenProducts.has(productId)) {
         var min_date = Utilities.parseDate(row["segments.date"], timeZone, "yyyy-MM-dd");
         var diffTime = today.getTime() - min_date.getTime();
@@ -122,7 +121,13 @@ function main() {
   Logger.log("Step 2: Searching for underperforming products (ROAS < " + ROAS_THRESHOLD + ") over " + LOOKBACK_DAYS + " days.");
   
   var labelToRead = "shopping_product.custom_attribute" + TARGET_CUSTOM_LABEL_INDEX;
-  var performanceQuery = "SELECT shopping_product.item_id, shopping_product.title, " + labelToRead + ", shopping_product.feed_label, metrics.cost_micros, metrics.conversions_value FROM shopping_product WHERE segments.date BETWEEN '" + performanceLookbackDateFormatted + "' AND '" + yesterdayFormatted + "' AND metrics.cost_micros > " + COST_THRESHOLD_MICROS + " AND shopping_product.feed_label = '" + FEED_LABEL + "' AND metrics.clicks > 0";
+  
+  var performanceQuery = "SELECT shopping_product.item_id, shopping_product.title, " + labelToRead + ", " +
+                         "shopping_product.feed_label, metrics.cost_micros, metrics.conversions_value " +
+                         "FROM shopping_product " +
+                         "WHERE segments.date BETWEEN '" + performanceLookbackDateFormatted + "' AND '" + yesterdayFormatted + "' " + 
+                         "AND metrics.cost_micros > " + COST_THRESHOLD_MICROS + " " +
+                         "AND metrics.clicks > 0";
 
   var potentialBadProducts = [];
 
@@ -132,6 +137,12 @@ function main() {
     
     while (rows.hasNext()) {
       var row = rows.next();
+      var feedLabel = row["shopping_product.feed_label"];
+      
+      if (ALLOWED_FEED_LABELS.length > 0 && ALLOWED_FEED_LABELS.indexOf(feedLabel) === -1) {
+        continue; 
+      }
+      
       var costMicros = parseFloat(row["metrics.cost_micros"]);  
       var convValue = parseFloat(row["metrics.conversions_value"]);
       var roas = (costMicros > 0) ? (convValue / (costMicros / 1000000)) : 0;
@@ -142,7 +153,8 @@ function main() {
           title: row["shopping_product.title"],
           currentLabel: row[labelToRead],
           costUAH: (costMicros / 1000000),
-          roas: roas
+          roas: roas,
+          feedLabel: feedLabel
         });
       }
     }
@@ -158,11 +170,10 @@ function main() {
     var product = potentialBadProducts[i];
     var productId = product.id;
     
-    // Check if the product meets ALL criteria: old enough, not already in the sheet, and not in grace period
     if (oldEnoughProducts.has(productId) && !masterListIds.has(productId) && !gracePeriodSet.has(productId)) {
       
-      Logger.log("Fetching price from Merchant Center for product: " + productId);
-      var productPrice = getProductPriceFromMerchantCenter(productId);
+      Logger.log("Fetching price for " + productId + " (Feed: " + product.feedLabel + ")");
+      var productPrice = getProductPriceFromMerchantCenter(productId, product.feedLabel);
       
       newProductsToAdd.push([
         productId,          
@@ -190,31 +201,30 @@ function main() {
   Logger.log("Script execution completed.");
 }
 
-function getProductPriceFromMerchantCenter(productId) {
-  // Try format 1: standard (e.g. online:uk:UA:12345)
-  var contentApiId = "online:" + FEED_LANGUAGE + ":" + FEED_LABEL + ":" + productId;
-  Logger.log("  -> Trying Content API ID: " + contentApiId);
-  
-  try {
-    var product = ShoppingContent.Products.get(MERCHANT_ID, contentApiId);
-    if (product && product.price) {
-      Logger.log("  -> SUCCESS: Price found: " + product.price.value);
-      return product.price.value; 
+function getProductPriceFromMerchantCenter(productId, feedLabel) {
+  // Loop through all allowed languages to find the matching product in Merchant Center
+  for (var i = 0; i < ALLOWED_LANGUAGES.length; i++) {
+    var cleanLanguage = ALLOWED_LANGUAGES[i].toLowerCase();
+    var contentApiId = "online:" + cleanLanguage + ":" + feedLabel + ":" + productId;
+    
+    try {
+      var product = ShoppingContent.Products.get(MERCHANT_ID, contentApiId);
+      if (product && product.price) {
+        return product.price.value; 
+      }
+    } catch(e) {
+      // Ignore error and try the next language code in the array
     }
-  } catch(e) {
-    Logger.log("  -> FAILED with ID format 1. Error: " + e.message);
   }
-
-  // Try format 2: fallback for some feed setups (just the product ID)
-  Logger.log("  -> Trying Fallback API ID: " + productId);
+  
+  // Fallback: Try just the product ID without formatting
   try {
-    var product = ShoppingContent.Products.get(MERCHANT_ID, productId);
-    if (product && product.price) {
-      Logger.log("  -> SUCCESS: Price found using fallback ID: " + product.price.value);
-      return product.price.value; 
+    var productFallback = ShoppingContent.Products.get(MERCHANT_ID, productId);
+    if (productFallback && productFallback.price) {
+      return productFallback.price.value; 
     }
-  } catch(e) {
-    Logger.log("  -> FAILED with format 2. Error: " + e.message);
+  } catch(err) {
+    // Both structured loops and fallback failed
   }
   
   return "Not Found";
