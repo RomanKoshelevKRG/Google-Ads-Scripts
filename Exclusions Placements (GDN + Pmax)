@@ -1,0 +1,205 @@
+/*
+1) This script scans ad placements across the entire account (including Performance Max).
+   It strictly filters ONLY websites, completely ignoring YouTube channels/videos and mobile apps 
+   to prevent Google Ads API errors.
+2) Exclusions are added to the shared list "PlacementCleanerList_New".
+*/
+
+var exclude = [
+    // --- Games, Gambling ---
+    'gta', 'dota', 'minecraft', 'igry', 'igra', 'igri', 'game', 'casino', 'slot', 
+    'poker', 'bonus', 'stavk', 'betting', 'gamer', 'geym', 'play-', 'quiz', 'test-',
+    'ferma', 'mafia', 'mario', '2048', 'dendy', 'sega', 'zuma', 'simulat', 'mods', 
+    'play', 'spintires', 'spin-tires',
+    
+    // --- Kids, School, Family Content ---
+    'kids', 'children', 'baby', 'mom', 'mama', 'parent', 'malysh', 'rebenok', 
+    'mult', 'cartoon', 'anime', 'raskrask', 'detskiy', 'doshkol', 'shkol', 
+    'ucheb', 'gdz', 'zno', 'student', 'resheb', 'referat', 'spongebob', 'barbie', 
+    'майнкрафт',
+    
+    // --- Entertainment, Media, File Sharing ---
+    'film', 'video', 'movie', 'kino', 'serial', 'tv', 'smotret', 'dyvytys', 
+    'online-', 'onlain', 'mp3', 'fb2', 'book', 'download', 'torrent', 'radio', 
+    'pesni', 'chords', 'anekdot', 'minusovk', 'knig', 'epub', 'citat', 'pdf', 
+    'lyrics', 'textpesn', 'oboі', 'wallpaper', 'smeshno', 'prikol', 'shanson',
+    'skachat', 'besplatno', 'free', 'flash', 'apk', 'android',
+    
+    // --- Esoterics, Horoscopes, Dating ---
+    'dating', 'goroskop', 'astro', 'zodiak', 'gadani', 'taro', 'znakomstv',
+    
+    // --- Recipes, Hobbies ---
+    'recept', 'recipe',
+    
+    // --- News, Politics (Use with caution!) ---
+    'novoros', 'donbass', 'dnr',
+    
+    // --- "Junk" and Aggregators ---
+    'top-', 'rating', 'katalog', 'sprav', 'forum', 'chat', 'blog', 'aforizm',
+    'weather', 'xxx', 'adult', 'porno', 'sex',
+    
+    // --- Domain Zones ---
+    '.kz', '.ru', '.by', '.uz', '.az', '.kg', '.in', '.cn', '.pl', '.md', '.xyz', '.online'
+];
+
+var EXCLUDED_PLACEMENT_LIST_NAME = 'PlacementCleanerList_New';
+
+/*
+3) Select the time period for gathering statistics:
+   LAST_7_DAYS, LAST_WEEK, LAST_MONTH, LAST_14_DAYS, LAST_30_DAYS,
+   LAST_BUSINESS_WEEK, THIS_WEEK_SUN_TODAY, THIS_WEEK_MON_TODAY,
+   LAST_WEEK_SUN_SAT, THIS_MONTH, ALL_TIME
+*/
+var period = 'LAST_7_DAYS';
+
+function main() {
+  // FORCED LIST CREATION: ensures the list is created immediately
+  ensureExclusionListExists();
+
+  var dateFilterAWQL = "";
+  var dateFilterGAQL = "";
+  if (period && period != 'ALL_TIME') {
+    dateFilterAWQL = "DURING " + period;
+    dateFilterGAQL = "WHERE segments.date DURING " + period;
+    Logger.log("Gathering statistics for period: " + period);
+  } else {
+    Logger.log('Gathering statistics for ALL_TIME');
+  }
+
+  // Get existing exclusions to avoid duplicates
+  var existingPlacements = getExistingPlacementsFromList();
+  var newPlacementsToExclude = [];
+
+  // --- 1. Standard campaigns (Display) ---
+  Logger.log("Analyzing standard Display campaigns...");
+  var standardReport = AdsApp.report(
+    "SELECT Domain " +
+    "FROM AUTOMATIC_PLACEMENTS_PERFORMANCE_REPORT " +
+    dateFilterAWQL
+  );
+  var stdRows = standardReport.rows();
+  while (stdRows.hasNext()) {
+    var placement = stdRows.next()['Domain'].toString();
+    processPlacement(placement, newPlacementsToExclude, existingPlacements);
+  }
+
+  // --- 2. Performance Max campaigns ---
+  Logger.log("Analyzing Performance Max campaigns...");
+  var pmaxQuery = "SELECT performance_max_placement_view.placement " +
+                  "FROM performance_max_placement_view " +
+                  dateFilterGAQL;
+  var pmaxReport = AdsApp.search(pmaxQuery);
+  
+  while (pmaxReport.hasNext()) {
+    var row = pmaxReport.next();
+    // Check if the field exists to prevent errors
+    if (row.performanceMaxPlacementView && row.performanceMaxPlacementView.placement) {
+      var placement = row.performanceMaxPlacementView.placement.toString();
+      processPlacement(placement, newPlacementsToExclude, existingPlacements);
+    }
+  }
+
+  // --- Adding results ---
+  if (newPlacementsToExclude.length > 0) {
+    Logger.log("Found new unique placements to exclude: " + newPlacementsToExclude.length);
+    addPlacementsToExclusionList(newPlacementsToExclude);
+  } else {
+    Logger.log("No new junk placements found.");
+  }
+}
+
+/**
+ * Universal function to check and add a placement (STRICTLY WEBSITES)
+ */
+function processPlacement(placement, excludeArray, existingDict) {
+  if (!placement) return;
+
+  // Convert to lowercase to catch mixed-case URLs (e.g., YouTube.com)
+  var lowerPlacement = placement.toLowerCase();
+
+  // 1. STRICT FILTER: Ignore mobile apps and ANY YouTube URLs
+  if (lowerPlacement.indexOf('mobileapp::') !== -1 || 
+      lowerPlacement.indexOf('youtube.com') !== -1 || 
+      lowerPlacement.indexOf('youtu.be') !== -1) {
+    return;
+  }
+  
+  // 2. Extra safety: ensure it looks like a valid domain (contains a dot)
+  if (lowerPlacement.indexOf('.') === -1) {
+    return;
+  }
+
+  // 3. Check for matches with the junk keywords array
+  if (containsAny(lowerPlacement, exclude)) {
+    // 4. Check if it's already in the Google Ads exclusion list
+    if (!existingDict[placement]) {
+      excludeArray.push(placement);
+      existingDict[placement] = true; 
+    }
+  }
+}
+
+/**
+ * Checks if the exclusion list exists and creates it if it doesn't
+ */
+function ensureExclusionListExists() {
+  var listIterator = AdsApp.excludedPlacementLists()
+    .withCondition("Name = '" + EXCLUDED_PLACEMENT_LIST_NAME + "'")
+    .get();
+
+  if (!listIterator.hasNext()) {
+    Logger.log("Creating new exclusion list: '" + EXCLUDED_PLACEMENT_LIST_NAME + "'");
+    AdsApp.newExcludedPlacementListBuilder()
+      .withName(EXCLUDED_PLACEMENT_LIST_NAME)
+      .build();
+  } else {
+    Logger.log("Exclusion list '" + EXCLUDED_PLACEMENT_LIST_NAME + "' already exists.");
+  }
+}
+
+/**
+ * Helper function to find substrings within a string
+ */
+function containsAny(str, substrings) {
+  for (var i = 0; i < substrings.length; i++) {
+    if (str.indexOf(substrings[i]) !== -1) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Helper function to retrieve already added exclusions from the list
+ */
+function getExistingPlacementsFromList() {
+  var existing = {};
+  var listIterator = AdsApp.excludedPlacementLists()
+    .withCondition("Name = '" + EXCLUDED_PLACEMENT_LIST_NAME + "'")
+    .get();
+
+  if (listIterator.hasNext()) {
+    var list = listIterator.next();
+    var placements = list.excludedPlacements().get();
+    while (placements.hasNext()) {
+      existing[placements.next().getUrl()] = true;
+    }
+    Logger.log("Found " + Object.keys(existing).length + " existing exclusions in the list.");
+  }
+  return existing;
+}
+
+/**
+ * Adds an array of placements to the existing exclusion list
+ */
+function addPlacementsToExclusionList(placementsToAdd) {
+  var listIterator = AdsApp.excludedPlacementLists()
+    .withCondition("Name = '" + EXCLUDED_PLACEMENT_LIST_NAME + "'")
+    .get();
+
+  if (listIterator.hasNext()) {
+    var excludedPlacementList = listIterator.next();
+    excludedPlacementList.addExcludedPlacements(placementsToAdd);
+    Logger.log("Successfully added " + placementsToAdd.length + " new placements.");
+  }
+}
