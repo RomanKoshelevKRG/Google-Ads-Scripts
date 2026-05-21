@@ -1,0 +1,176 @@
+/*
+1) This script finds YouTube channels where your ads were shown.
+2) It connects to the YouTube Data API to check the channel's country and keywords.
+3) It automatically exports the "bad" channels into a Google Sheet with detailed reasons.
+
+=============================================================================
+HOW TO GET YOUR FREE YOUTUBE API KEY:
+1. Go to the Google Cloud Console (console.cloud.google.com).
+2. Create a new project (or select an existing one).
+3. Search for "YouTube Data API v3" at the top and click "Enable".
+4. Go to the left menu: APIs & Services -> Credentials.
+5. Click "Create credentials" -> "API key".
+6. Copy this key and paste it into the script below, replacing 'YOUR_API_KEY_HERE'.
+=============================================================================
+*/
+
+// --- SETTINGS ---
+var YOUTUBE_API_KEY = 'YOUR_API_KEY_HERE'; // Paste your Google Cloud API key here
+var SPREADSHEET_URL = 'YOUR_SPREADSHEET_URL_HERE'; // Paste your Google Sheet URL here (leave empty to create a new one automatically)
+
+// List of ISO 3166-1 alpha-2 country codes to exclude (e.g., 'RU' for Russia, 'IN' for India)
+var BAD_COUNTRIES = ['RU', 'IN', 'PK', 'BD']; 
+
+// Keywords to look for in the channel's Title or Description
+var BAD_KEYWORDS = [
+  'kids', 'children', 'малыш', 'детск', 'minecraft', 'roblox', 
+  'игры', 'game', 'мультик', 'cartoon'
+];
+
+var PERIOD = 'LAST_14_DAYS';
+
+function main() {
+  Logger.log("Starting YouTube Placement Audit with Google Sheets export...");
+  
+  // 1. Get placements from Google Ads
+  var report = AdsApp.report(
+    "SELECT Domain " +
+    "FROM AUTOMATIC_PLACEMENTS_PERFORMANCE_REPORT " +
+    "WHERE Domain CONTAINS 'youtube.com/channel/' " +
+    "DURING " + PERIOD
+  );
+
+  var rows = report.rows();
+  var channelIds = [];
+  var uniquePlacements = {};
+
+  // Extract Channel IDs
+  while (rows.hasNext()) {
+    var domain = rows.next()['Domain'].toString();
+    if (!uniquePlacements[domain]) {
+      uniquePlacements[domain] = true;
+      var match = domain.match(/youtube\.com\/channel\/(UC[\w-]+)/);
+      if (match && match[1]) {
+        channelIds.push(match[1]);
+      }
+    }
+  }
+
+  Logger.log("Found " + channelIds.length + " unique YouTube channels to analyze.");
+
+  if (channelIds.length === 0) {
+    Logger.log("No YouTube channels found for the selected period.");
+    return;
+  }
+
+  // 2. Process in batches (YouTube API allows max 50 IDs per request)
+  var badChannelsData = [];
+  var batchSize = 50;
+
+  for (var i = 0; i < channelIds.length; i += batchSize) {
+    var batch = channelIds.slice(i, i + batchSize);
+    var apiUrl = 'https://www.googleapis.com/youtube/v3/channels?part=snippet&id=' + batch.join(',') + '&key=' + YOUTUBE_API_KEY;
+    
+    try {
+      var response = UrlFetchApp.fetch(apiUrl, { muteHttpExceptions: true });
+      if (response.getResponseCode() == 200) {
+        var data = JSON.parse(response.getContentText());
+        
+        // 3. Analyze each channel's data
+        for (var j = 0; j < data.items.length; j++) {
+          var item = data.items[j];
+          var chId = item.id;
+          var snippet = item.snippet;
+          
+          var country = snippet.country || 'UNKNOWN';
+          var title = snippet.title || 'UNKNOWN';
+          var description = snippet.description || '';
+          
+          var isBad = false;
+          var reason = "";
+
+          // Check Country
+          if (BAD_COUNTRIES.indexOf(country) !== -1) {
+            isBad = true;
+            reason = "Bad Country (" + country + ")";
+          } 
+          // Check Keywords
+          else if (containsAny(title + " " + description, BAD_KEYWORDS)) {
+            isBad = true;
+            reason = "Keyword Match";
+          }
+
+          if (isBad) {
+            // Structuring data for rows: Date, URL, Title, Country, Reason
+            badChannelsData.push([
+              new Date(),
+              'youtube.com/channel/' + chId,
+              title,
+              country,
+              reason
+            ]);
+          }
+        }
+      } else {
+        Logger.log("API Error: " + response.getContentText());
+      }
+    } catch (e) {
+      Logger.log("Failed to fetch YouTube data: " + e.message);
+    }
+  }
+
+  // 4. Export results to Google Sheets
+  if (badChannelsData.length > 0) {
+    var sheet = getGoogleSheet();
+    if (sheet) {
+      // Add headers if the sheet is completely brand new/empty
+      if (sheet.getLastRow() === 0) {
+        sheet.appendRow(["Date Found", "Channel URL", "Channel Title", "Country", "Reason for Exclusion"]);
+      }
+      
+      // Append all found bad channels at once
+      sheet.getRange(sheet.getLastRow() + 1, 1, badChannelsData.length, badChannelsData[0].length).setValues(badChannelsData);
+      Logger.log("Successfully exported " + badChannelsData.length + " bad channels to Google Sheets.");
+    }
+  } else {
+    Logger.log("No bad channels found during this run.");
+  }
+}
+
+/**
+ * Helper function to find or create the Google Sheet
+ */
+function getGoogleSheet() {
+  var ss;
+  if (SPREADSHEET_URL && SPREADSHEET_URL !== 'YOUR_SPREADSHEET_URL_HERE') {
+    try {
+      ss = SpreadsheetApp.openByUrl(SPREADSHEET_URL);
+    } catch (e) {
+      Logger.log("Error opening spreadsheet by URL: " + e.message);
+      return null;
+    }
+  } else {
+    try {
+      ss = SpreadsheetApp.create("YouTube_Bad_Channels_Audit");
+      Logger.log("Created a new Google Sheet named 'YouTube_Bad_Channels_Audit'.");
+      Logger.log("URL: " + ss.getUrl());
+    } catch (e) {
+      Logger.log("Error creating a new spreadsheet: " + e.message);
+      return null;
+    }
+  }
+  return ss.getActiveSheet();
+}
+
+/**
+ * Helper function to check keywords
+ */
+function containsAny(text, keywords) {
+  var lowerText = text.toLowerCase();
+  for (var i = 0; i < keywords.length; i++) {
+    if (lowerText.indexOf(keywords[i].toLowerCase()) !== -1) {
+      return true;
+    }
+  }
+  return false;
+}
