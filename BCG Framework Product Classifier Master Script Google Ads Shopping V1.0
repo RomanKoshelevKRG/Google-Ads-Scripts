@@ -1,23 +1,35 @@
+/**
+ * Google Ads Performance Max (PMax) & Shopping Item Classifier
+ * * This script analyzes performance data for all products in a Google Merchant Center feed
+ * over a specified lookback window. It categorizes products based on Impressions, Clicks, 
+ * Cost, Conversions, and ROAS, assigning a specific Custom Label to each item.
+ * * Features:
+ * - Identifies "Ghosts" (0 impressions) and "Zombies" (high impressions, 0 clicks).
+ * - Distinguishes between top performers ("Stars", "Cash Cows") and budget wasters ("Bad ROAS").
+ * - Protects newly added products ("New Arrivals") and manually selected items ("Grace Period").
+ * - Automatically generates a visual Dashboard and historical performance charts in Google Sheets.
+ */
+
 // =======================================================================
 // === CONFIGURATION BLOCK (ADJUST YOUR PARAMETERS HERE) =================
 // =======================================================================
 
-// 1. Spreadsheet Settings (REPLACE WITH YOUR SPREADSHEET URL)
-var SPREADSHEET_URL = "https://docs.google.com/spreadsheets/d/YOUR_SPREADSHEET_ID_HERE/edit"; 
+// 1. Spreadsheet Settings
+var SPREADSHEET_URL = "YOUR_SPREADSHEET_URL_HERE"; 
 var MAIN_SHEET_NAME = "Product_Classifier";
 var GRACE_PERIOD_SHEET = "Grace_Period"; // Sheet for protecting products from being excluded
 var HISTORY_SHEET_NAME = "History";      // Sheet for daily historical records
 var DASHBOARD_SHEET_NAME = "Dashboard";  // Sheet for visual charts
 
 // 2. Merchant Center Settings
-var TARGET_CUSTOM_LABEL = 2; // Choose which custom label to use (0, 1, 2, 3, or 4)
+var TARGET_CUSTOM_LABEL = 4; // Choose which custom label to use (0, 1, 2, 3, or 4)
 
 // 3. Analysis Periods
 var LOOKBACK_DAYS = 30; 
 var AGE_LOOKBACK_DAYS = 60; 
 
 // 4. Classification Rules & KPIs (SCALING LOGIC)
-var NEW_ARRIVAL_DAYS = 14;              // Sandbox / Quarantine period for new products
+var NEW_ARRIVAL_DAYS = 14;              // Sandbox / Quarantine period
 var ZOMBIE_IMPRESSIONS_THRESHOLD = 150; // Zombie threshold (high impressions, no clicks)
 var ROAS_STAR_THRESHOLD = 8.0;          // ROAS >= 800% (Stars)
 var ROAS_CASH_COW = 5.0;                // ROAS >= 500% (Stable cash cows)
@@ -41,7 +53,7 @@ function main() {
   
   var labelHeader = "custom_label_" + TARGET_CUSTOM_LABEL;
   
-  // Header row setup: Included '#' to analytical columns for readability
+  // Added '#' to analytical columns and moved labelHeader next to id for Merchant Center compatibility
   sheet.appendRow(["id", labelHeader, "#title", "#Impressions", "#Clicks", "#Cost", "#Conversions", "#Calculated ROAS", "#Age (Days)"]);
 
   var timeZone = AdsApp.currentAccount().getTimeZone();
@@ -138,6 +150,10 @@ function main() {
     "under_review": 0
   };
 
+  var totalActiveProducts = 0;
+  var productsWithImps = 0;
+  var productsWithClicks = 0;
+
   for (var id in fullCatalog) {
     var title = fullCatalog[id];
     var data = aggregatedData[id]; 
@@ -152,6 +168,10 @@ function main() {
     var age = productAges[id] !== undefined ? productAges[id] : AGE_LOOKBACK_DAYS;
     var category = "";
     var isProtected = protectedIds.has(id); 
+
+    totalActiveProducts++;
+    if (imps > 0) productsWithImps++;
+    if (clicks > 0) productsWithClicks++;
 
     // === MASTER SCALING & EXCLUSION LOGIC ===
     if (age <= NEW_ARRIVAL_DAYS && imps > 0) {
@@ -181,25 +201,38 @@ function main() {
     productsToReport.push([id, category, title, imps, clicks, costLocal.toFixed(2), convs.toFixed(2), roas.toFixed(2), age]);
   }
 
+  var percImps = totalActiveProducts > 0 ? parseFloat(((productsWithImps / totalActiveProducts) * 100).toFixed(2)) : 0;
+  var percClicks = totalActiveProducts > 0 ? parseFloat(((productsWithClicks / totalActiveProducts) * 100).toFixed(2)) : 0;
+
   if (productsToReport.length > 0) {
     sheet.getRange(2, 1, productsToReport.length, 9).setValues(productsToReport);
     Logger.log("Total products processed: " + productsToReport.length);
     formatVisualReport(sheet, productsToReport.length + 1);
     
-    updateDashboardAndHistory(spreadsheet, categoryCounts, todayStr);
+    updateDashboardAndHistory(spreadsheet, categoryCounts, todayStr, percImps, percClicks);
   } else {
     Logger.log("No data found to write.");
   }
 }
 
 // === FUNCTION TO UPDATE HISTORY AND GENERATE CHARTS ===
-function updateDashboardAndHistory(spreadsheet, counts, todayStr) {
+function updateDashboardAndHistory(spreadsheet, counts, todayStr, percImps, percClicks) {
   Logger.log("Updating History and Dashboard...");
   
   var historySheet = spreadsheet.getSheetByName(HISTORY_SHEET_NAME) || spreadsheet.insertSheet(HISTORY_SHEET_NAME);
+  var lastCol = historySheet.getLastColumn();
+  
   if (historySheet.getLastRow() === 0) {
-    historySheet.appendRow(["Date", "star", "cash_cow", "bad_roas", "grace_period", "new_arrival", "zombie", "ghost", "under_review"]);
-    historySheet.getRange("A1:I1").setFontWeight("bold").setBackground("#2c3e50").setFontColor("#ffffff");
+    historySheet.appendRow(["Date", "star", "cash_cow", "bad_roas", "grace_period", "new_arrival", "zombie", "ghost", "under_review", "% with Imps", "% with Clicks"]);
+    historySheet.getRange("A1:K1").setFontWeight("bold").setBackground("#2c3e50").setFontColor("#ffffff");
+  } else {
+    var headers = historySheet.getRange(1, 1, 1, lastCol > 0 ? lastCol : 1).getValues()[0];
+    if (headers.indexOf("% with Imps") === -1) {
+      var newColIndex = headers.length + 1;
+      historySheet.getRange(1, newColIndex).setValue("% with Imps");
+      historySheet.getRange(1, newColIndex + 1).setValue("% with Clicks");
+      historySheet.getRange(1, newColIndex, 1, 2).setFontWeight("bold").setBackground("#2c3e50").setFontColor("#ffffff");
+    }
   }
   
   historySheet.appendRow([
@@ -211,7 +244,9 @@ function updateDashboardAndHistory(spreadsheet, counts, todayStr) {
     counts["new_arrival"],
     counts["zombie_content_issue"],
     counts["ghost_bidding_issue"],
-    counts["under_review"]
+    counts["under_review"],
+    percImps,
+    percClicks
   ]);
 
   var dashSheet = spreadsheet.getSheetByName(DASHBOARD_SHEET_NAME) || spreadsheet.insertSheet(DASHBOARD_SHEET_NAME);
@@ -249,7 +284,7 @@ function updateDashboardAndHistory(spreadsheet, counts, todayStr) {
     var lineChart = dashSheet.newChart()
       .asLineChart()
       .addRange(historySheet.getRange(1, 1, lastHistRow, 9))
-      .setNumHeaders(1) // Required for correct legend display
+      .setNumHeaders(1)
       .setOption('useFirstColumnAsDomain', true)
       .setPosition(2, 12, 0, 0)
       .setOption('title', 'Category Dynamics Over Time')
@@ -259,6 +294,27 @@ function updateDashboardAndHistory(spreadsheet, counts, todayStr) {
       .setOption('legend', {position: 'right'})
       .build();
     dashSheet.insertChart(lineChart);
+
+    var headers = historySheet.getRange(1, 1, 1, historySheet.getLastColumn()).getValues()[0];
+    var impsColIndex = headers.indexOf("% with Imps") + 1;
+    
+    if (impsColIndex > 0) {
+      var percChart = dashSheet.newChart()
+        .asLineChart()
+        .addRange(historySheet.getRange(1, 1, lastHistRow, 1)) 
+        .addRange(historySheet.getRange(1, impsColIndex, lastHistRow, 2)) 
+        .setNumHeaders(1)
+        .setOption('useFirstColumnAsDomain', true)
+        .setPosition(23, 12, 0, 0) 
+        .setOption('title', 'Active Catalog Engagement (% of products)')
+        .setOption('width', 800)
+        .setOption('height', 400)
+        .setOption('curveType', 'function')
+        .setOption('legend', {position: 'right'})
+        .setOption('vAxis', {minValue: 0, maxValue: 100}) 
+        .build();
+      dashSheet.insertChart(percChart);
+    }
   }
   Logger.log("Dashboard updated successfully!");
 }
@@ -292,4 +348,27 @@ function getGracePeriodIds(spreadsheet) {
   return protectedSet;
 }
 
-// === VISUAL SPREADSHEET FORMATTING FUNCTION
+// === VISUAL SPREADSHEET FORMATTING FUNCTION ===
+function formatVisualReport(sheet, lastRow) {
+  var headerRange = sheet.getRange("A1:I1");
+  headerRange.setBackground("#2c3e50"); 
+  headerRange.setFontColor("#ffffff"); 
+  headerRange.setFontWeight("bold");
+  
+  sheet.setFrozenRows(1); 
+  
+  var categoryRange = sheet.getRange("B2:B" + lastRow);
+  sheet.clearConditionalFormatRules(); 
+  var rules = [];
+  
+  rules.push(SpreadsheetApp.newConditionalFormatRule().whenTextEqualTo("star").setBackground("#81c784").setRanges([categoryRange]).build()); 
+  rules.push(SpreadsheetApp.newConditionalFormatRule().whenTextEqualTo("cash_cow").setBackground("#c8e6c9").setRanges([categoryRange]).build()); 
+  rules.push(SpreadsheetApp.newConditionalFormatRule().whenTextEqualTo("bad_roas").setBackground("#ffcdd2").setRanges([categoryRange]).build()); 
+  rules.push(SpreadsheetApp.newConditionalFormatRule().whenTextEqualTo("grace_period_protected").setBackground("#e1bee7").setRanges([categoryRange]).build()); 
+  rules.push(SpreadsheetApp.newConditionalFormatRule().whenTextEqualTo("new_arrival").setBackground("#bbdefb").setRanges([categoryRange]).build()); 
+  rules.push(SpreadsheetApp.newConditionalFormatRule().whenTextEqualTo("zombie_content_issue").setBackground("#fff9c4").setRanges([categoryRange]).build()); 
+  rules.push(SpreadsheetApp.newConditionalFormatRule().whenTextEqualTo("ghost_bidding_issue").setBackground("#e0e0e0").setRanges([categoryRange]).build()); 
+
+  sheet.setConditionalFormatRules(rules);
+  sheet.autoResizeColumns(1, 9);
+}
